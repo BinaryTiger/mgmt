@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-package main
+package resource
 
 import (
 	"encoding/gob"
@@ -27,10 +27,9 @@ func init() {
 	gob.Register(&CronRes{})
 }
 
-// CronRes is a no-op resource that does nothing.
+// CronRes is a systemd Timer resource used to triger events and scripts based on a timer.
 type CronRes struct {
 	BaseRes `yaml:",inline"`
-	Comment string `yaml:"comment"` // extra field for example purposes
 }
 
 // NewCronRes is a constructor for this resource. It also calls Init() for you.
@@ -47,7 +46,7 @@ func NewCronRes(name string) *CronRes {
 
 // Init runs some startup code for this resource.
 func (obj *CronRes) Init() {
-	obj.BaseRes.kind = "Noop"
+	obj.BaseRes.kind = "Cron"
 	obj.BaseRes.Init() // call base init, b/c we're overriding
 }
 
@@ -137,19 +136,6 @@ func (obj *CronRes) GetUUIDs() []ResUUID {
 	return []ResUUID{x}
 }
 
-// GroupCmp returns whether two resources can be grouped together or not.
-func (obj *CronRes) GroupCmp(r Res) bool {
-	_, ok := r.(*CronRes)
-	if !ok {
-		// NOTE: technically we could group a noop into any other
-		// resource, if that resource knew how to handle it, although,
-		// since the mechanics of inter-kind resource grouping are
-		// tricky, avoid doing this until there's a good reason.
-		return false
-	}
-	return true // noop resources can always be grouped together!
-}
-
 // Compare two resources and return if they are equivalent.
 func (obj *CronRes) Compare(res Res) bool {
 	switch res.(type) {
@@ -163,6 +149,7 @@ func (obj *CronRes) Compare(res Res) bool {
 		if obj.Name != res.Name {
 			return false
 		}
+		// TODO: Add every other fields of CronRes
 	default:
 		return false
 	}
