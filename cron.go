@@ -20,31 +20,26 @@ package main
 import (
 	"encoding/gob"
 	"log"
+	"time"
 )
 
 func init() {
 	gob.Register(&CronRes{})
 }
 
-// CronRes is a timer resource for time based events based on systemd Cron.
+// CronRes is a no-op resource that does nothing.
 type CronRes struct {
-	BaseRes  `yaml:",inline"`
-	Interval int `yaml:"interval"` // Interval : Interval between runs
-}
-
-// CronUUID is the UUID struct for CronRes.
-type CronUUID struct {
-	BaseUUID
-	name string
+	BaseRes `yaml:",inline"`
+	Comment string `yaml:"comment"` // extra field for example purposes
 }
 
 // NewCronRes is a constructor for this resource. It also calls Init() for you.
-func NewCronRes(name string, interval int) *CronRes {
+func NewCronRes(name string) *CronRes {
 	obj := &CronRes{
 		BaseRes: BaseRes{
 			Name: name,
 		},
-		Interval: interval,
+		Comment: "",
 	}
 	obj.Init()
 	return obj
@@ -52,13 +47,12 @@ func NewCronRes(name string, interval int) *CronRes {
 
 // Init runs some startup code for this resource.
 func (obj *CronRes) Init() {
-	obj.BaseRes.kind = "Cron"
-	obj.BaseRes.Init() // call base init, b/c we're overrriding
+	obj.BaseRes.kind = "Noop"
+	obj.BaseRes.Init() // call base init, b/c we're overriding
 }
 
-// Validate the params that are passed to CronRes.
-// Currently we are getting only an interval in seconds
-// which gets validated by go compiler
+// validate if the params passed in are valid data
+// FIXME: where should this get called ?
 func (obj *CronRes) Validate() bool {
 	return true
 }
@@ -66,7 +60,7 @@ func (obj *CronRes) Validate() bool {
 // Watch is the primary listener for this resource and it outputs events.
 func (obj *CronRes) Watch(processChan chan Event) error {
 	if obj.IsWatching() {
-		return nil
+		return nil // TODO: should this be an error?
 	}
 	obj.SetWatching(true)
 	defer obj.SetWatching(false)
@@ -82,53 +76,50 @@ func (obj *CronRes) Watch(processChan chan Event) error {
 		return time.After(time.Duration(500) * time.Millisecond) // 1/2 the resolution of converged timeout
 	}
 
-	// Create a time.Ticker for the given interval
-	ticker := time.NewTicker(time.Duration(obj.Interval) * time.Second)
-	defer ticker.Stop()
-
-	var send = false
-
+	var send = false // send event?
+	var exit = false
 	for {
-		obj.SetState(resStateWatching)
+		obj.SetState(resStateWatching) // reset
 		select {
-		case <-ticker.C: // received the timer event
-			send = true
-			log.Printf("%v[%v]: received tick", obj.Kind(), obj.GetName())
 		case event := <-obj.events:
 			cuuid.SetConverged(false)
-			if exit, _ := obj.ReadEvent(&event); exit {
-				return nil
+			// we avoid sending events on unpause
+			if exit, send = obj.ReadEvent(&event); exit {
+				return nil // exit
 			}
-		case <-cuuid.ConvergedCron():
-			cuuid.SetConverged(true)
+
+		case <-cuuid.ConvergedTimer():
+			cuuid.SetConverged(true) // converged!
 			continue
 
 		case <-Startup(startup):
 			cuuid.SetConverged(false)
 			send = true
 		}
+
+		// do all our event sending all together to avoid duplicate msgs
 		if send {
 			startup = true // startup finished
 			send = false
-			obj.isStateOK = false
-			if exit, err := obj.DoSend(processChan, "timer ticked"); exit || err != nil {
+			// only do this on certain types of events
+			//obj.isStateOK = false // something made state dirty
+			if exit, err := obj.DoSend(processChan, ""); exit || err != nil {
 				return err // we exit or bubble up a NACK...
 			}
 		}
 	}
 }
 
-// GetUUIDs includes all params to make a unique identification of this object.
-// Most resources only return one, although some resources can return multiple.
-func (obj *CronRes) GetUUIDs() []ResUUID {
-	x := &CronUUID{
-		BaseUUID: BaseUUID{
-			name: obj.GetName(),
-			kind: obj.Kind(),
-		},
-		name: obj.Name,
-	}
-	return []ResUUID{x}
+// CheckApply method for Noop resource. Does nothing, returns happy!
+func (obj *CronRes) CheckApply(apply bool) (checkok bool, err error) {
+	log.Printf("%v[%v]: CheckApply(%t)", obj.Kind(), obj.GetName(), apply)
+	return true, nil // state is always okay
+}
+
+// NoopUUID is the UUID struct for CronRes.
+type NoopUUID struct {
+	BaseUUID
+	name string
 }
 
 // The AutoEdges method returns the AutoEdges. In this case none are used.
@@ -136,28 +127,44 @@ func (obj *CronRes) AutoEdges() AutoEdge {
 	return nil
 }
 
+// GetUUIDs includes all params to make a unique identification of this object.
+// Most resources only return one, although some resources can return multiple.
+func (obj *CronRes) GetUUIDs() []ResUUID {
+	x := &NoopUUID{
+		BaseUUID: BaseUUID{name: obj.GetName(), kind: obj.Kind()},
+		name:     obj.Name,
+	}
+	return []ResUUID{x}
+}
+
+// GroupCmp returns whether two resources can be grouped together or not.
+func (obj *CronRes) GroupCmp(r Res) bool {
+	_, ok := r.(*CronRes)
+	if !ok {
+		// NOTE: technically we could group a noop into any other
+		// resource, if that resource knew how to handle it, although,
+		// since the mechanics of inter-kind resource grouping are
+		// tricky, avoid doing this until there's a good reason.
+		return false
+	}
+	return true // noop resources can always be grouped together!
+}
+
 // Compare two resources and return if they are equivalent.
 func (obj *CronRes) Compare(res Res) bool {
 	switch res.(type) {
+	// we can only compare CronRes to others of the same resource
 	case *CronRes:
 		res := res.(*CronRes)
-		if !obj.BaseRes.Compare(res) {
-			return false
-		}
+		// calling base Compare is unneeded for the noop res
+		//if !obj.BaseRes.Compare(res) { // call base Compare
+		//	return false
+		//}
 		if obj.Name != res.Name {
-			return false
-		}
-		if obj.Interval != res.Interval {
 			return false
 		}
 	default:
 		return false
 	}
 	return true
-}
-
-// CheckApply method for Cron resource. Does nothing, returns happy!
-func (obj *CronRes) CheckApply(apply bool) (bool, error) {
-	log.Printf("%v[%v]: CheckApply(%t)", obj.Kind(), obj.GetName(), apply)
-	return true, nil // state is always okay
 }
